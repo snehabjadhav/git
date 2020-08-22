@@ -1506,7 +1506,7 @@ static void compute_bloom_filters(struct write_commit_graph_context *ctx)
 		ctx->order_by_pack ? commit_pos_cmp : commit_gen_cmp,
 		&ctx->commits);
 
-	max_new_filters = ctx->opts->max_new_filters >= 0 ?
+	max_new_filters = ctx->opts && ctx->opts->max_new_filters >= 0 ?
 		ctx->opts->max_new_filters : ctx->commits.nr;
 
 	for (i = 0; i < ctx->commits.nr; i++) {
