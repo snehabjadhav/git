@@ -451,7 +451,7 @@ static int parse_diff(struct add_p_state *s, const struct pathspec *ps)
 	pend = p + plain->len;
 	while (p != pend) {
 		char *eol = memchr(p, '\n', pend - p);
-		const char *deleted = NULL, *added = NULL, *mode_change = NULL;
+		const char *mode_change = NULL;
 
 		if (!eol)
 			eol = pend;
@@ -468,12 +468,7 @@ static int parse_diff(struct add_p_state *s, const struct pathspec *ps)
 		} else if (p == plain->buf)
 			BUG("diff starts with unexpected line:\n"
 			    "%.*s\n", (int)(eol - p), p);
-		else if (file_diff->deleted || file_diff->added)
-			; /* keep the rest of the file in a single "hunk" */
-		else if (starts_with(p, "@@ ") ||
-			 (hunk == &file_diff->head &&
-			  (skip_prefix(p, "deleted file", &deleted) ||
-			   skip_prefix(p, "new file", &added)))) {
+		else if (starts_with(p, "@@ ")) {
 			if (marker == '-' || marker == '+')
 				/*
 				 * Should not happen; previous hunk did not end
@@ -489,11 +484,7 @@ static int parse_diff(struct add_p_state *s, const struct pathspec *ps)
 			if (colored)
 				hunk->colored_start = colored_p - colored->buf;
 
-			if (deleted)
-				file_diff->deleted = 1;
-			else if (added)
-				file_diff->added = 1;
-			else if (parse_hunk_header(s, hunk) < 0)
+			if (parse_hunk_header(s, hunk) < 0)
 				return -1;
 
 			/*
@@ -501,6 +492,12 @@ static int parse_diff(struct add_p_state *s, const struct pathspec *ps)
 			 * split
 			 */
 			marker = *p;
+		} else if (hunk == &file_diff->head &&
+			   starts_with(p, "new file")) {
+			file_diff->added = 1;
+		} else if (hunk == &file_diff->head &&
+			   starts_with(p, "deleted file")) {
+			file_diff->deleted = 1;
 		} else if (hunk == &file_diff->head &&
 			   skip_prefix(p, "old mode ", &mode_change) &&
 			   is_octal(mode_change, eol - mode_change)) {
@@ -1362,39 +1359,46 @@ static int patch_update_file(struct add_p_state *s,
 		ALLOW_EDIT = 1 << 6
 	} permitted = 0;
 
-	if (!file_diff->hunk_nr)
+	/* Empty added and deleted files have no hunks */
+	if (!file_diff->hunk_nr && !file_diff->added && !file_diff->deleted)
 		return 0;
 
 	strbuf_reset(&s->buf);
 	render_diff_header(s, file_diff, colored, &s->buf);
 	fputs(s->buf.buf, stdout);
 	for (;;) {
-		if (hunk_index >= file_diff->hunk_nr)
-			hunk_index = 0;
-		hunk = file_diff->hunk + hunk_index;
+		if (file_diff->hunk_nr) {
+			if (hunk_index >= file_diff->hunk_nr)
+				hunk_index = 0;
+			hunk = file_diff->hunk + hunk_index;
 
-		undecided_previous = -1;
-		for (i = hunk_index - 1; i >= 0; i--)
-			if (file_diff->hunk[i].use == UNDECIDED_HUNK) {
-				undecided_previous = i;
+			undecided_previous = -1;
+			for (i = hunk_index - 1; i >= 0; i--)
+				if (file_diff->hunk[i].use == UNDECIDED_HUNK) {
+					undecided_previous = i;
+					break;
+				}
+
+			undecided_next = -1;
+			for (i = hunk_index + 1; i < file_diff->hunk_nr; i++)
+				if (file_diff->hunk[i].use == UNDECIDED_HUNK) {
+					undecided_next = i;
+					break;
+				}
+
+			/* Everything decided? */
+			if (undecided_previous < 0 && undecided_next < 0 &&
+			    hunk->use != UNDECIDED_HUNK)
 				break;
-			}
 
-		undecided_next = -1;
-		for (i = hunk_index + 1; i < file_diff->hunk_nr; i++)
-			if (file_diff->hunk[i].use == UNDECIDED_HUNK) {
-				undecided_next = i;
-				break;
-			}
-
-		/* Everything decided? */
-		if (undecided_previous < 0 && undecided_next < 0 &&
-		    hunk->use != UNDECIDED_HUNK)
-			break;
-
-		strbuf_reset(&s->buf);
-		render_hunk(s, hunk, 0, colored, &s->buf);
-		fputs(s->buf.buf, stdout);
+			strbuf_reset(&s->buf);
+			render_hunk(s, hunk, 0, colored, &s->buf);
+			fputs(s->buf.buf, stdout);
+		} else {
+			hunk = &file_diff->head;
+			undecided_next = -1;
+			undecided_previous = -1;
+		}
 
 		strbuf_reset(&s->buf);
 		if (undecided_previous >= 0) {
@@ -1438,7 +1442,9 @@ static int patch_update_file(struct add_p_state *s,
 		color_fprintf(stdout, s->s.prompt_color,
 			      "(%"PRIuMAX"/%"PRIuMAX") ",
 			      (uintmax_t)hunk_index + 1,
-			      (uintmax_t)file_diff->hunk_nr);
+			      (uintmax_t)(file_diff->hunk_nr
+						? file_diff->hunk_nr
+						: 1));
 		color_fprintf(stdout, s->s.prompt_color,
 			      _(s->mode->prompt_mode[prompt_mode_type]),
 			      s->buf.buf);
@@ -1618,6 +1624,8 @@ soft_increment:
 						 "%.*s", (int)(eol - p), p);
 			}
 		}
+		if (!file_diff->hunk_nr)
+			break;
 	}
 
 	/* Any hunk to be used? */
@@ -1625,7 +1633,8 @@ soft_increment:
 		if (file_diff->hunk[i].use == USE_HUNK)
 			break;
 
-	if (i < file_diff->hunk_nr) {
+	if (i < file_diff->hunk_nr ||
+	    (!file_diff->hunk_nr && file_diff->head.use == USE_HUNK)) {
 		/* At least one hunk selected: apply */
 		strbuf_reset(&s->buf);
 		reassemble_patch(s, file_diff, 0, &s->buf);
