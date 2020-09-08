@@ -357,8 +357,15 @@ char *quote_path(const char *in, const char *prefix, struct strbuf *out, unsigne
 	struct strbuf sb = STRBUF_INIT;
 	const char *rel = relative_path(in, prefix, &sb);
 	strbuf_reset(out);
-	quote_c_style_counted(rel, strlen(rel), out, NULL, flags);
+	quote_c_style_counted(rel, strlen(rel), out, NULL, 0);
 	strbuf_release(&sb);
+
+	if ((flags & QUOTE_PATH_QUOTE_SP) &&
+	    (out->buf[0] != '"' && strchr(out->buf, ' '))) {
+		/* Ensure the whole thing is quoted if the path has SP in it */
+		strbuf_insertstr(out, 0, "\"");
+		strbuf_addch(out, '"');
+	}
 
 	return out->buf;
 }
